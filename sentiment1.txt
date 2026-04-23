@@ -1,0 +1,185 @@
+# =========================
+# 1. INSTALL DEPENDENCIES
+# =========================
+!pip install transformers datasets pandas scikit-learn accelerate evaluate -q
+
+
+# =========================
+# 2. IMPORTS
+# =========================
+import pandas as pd
+import numpy as np
+from datasets import Dataset, DatasetDict
+from transformers import (
+    AutoTokenizer,
+    AutoModelForSeq2SeqLM,
+    TrainingArguments,
+    Trainer,
+    DataCollatorForSeq2Seq
+)
+import evaluate
+
+
+# =========================
+# 3. LOAD DATA
+# =========================
+train_df = pd.read_csv("/kaggle/input/competitions/gen-ai-summarization-sprint/samsum-train.csv")
+valid_df = pd.read_csv("/kaggle/input/competitions/gen-ai-summarization-sprint/samsum-validation.csv")
+test_df  = pd.read_csv("/kaggle/input/competitions/gen-ai-summarization-sprint/samsum-test.csv")
+
+
+# =========================
+# 4. CLEAN DATA
+# =========================
+train_df.dropna(inplace=True)
+valid_df.dropna(inplace=True)
+test_df.dropna(inplace=True)
+
+train_df.drop_duplicates(inplace=True)
+valid_df.drop_duplicates(inplace=True)
+test_df.drop_duplicates(inplace=True)
+
+
+# =========================
+# 5. CONVERT TO HF DATASET
+# =========================
+dataset = DatasetDict({
+    "train": Dataset.from_pandas(train_df),
+    "validation": Dataset.from_pandas(valid_df),
+    "test": Dataset.from_pandas(test_df)
+})
+
+
+# =========================
+# 6. MODEL + TOKENIZER (T5)
+# =========================
+model_name = "t5-small"
+
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+
+
+# =========================
+# 7. TOKENIZATION FUNCTION
+# =========================
+def tokenize_function(example):
+    inputs = ["summarize: " + d for d in example["dialogue"]]
+
+    model_inputs = tokenizer(
+        inputs,
+        padding="max_length",
+        truncation=True,
+        max_length=128
+    )
+
+    labels = tokenizer(
+        example["summary"],
+        padding="max_length",
+        truncation=True,
+        max_length=64
+    )
+
+    model_inputs["labels"] = labels["input_ids"]
+    return model_inputs
+
+
+# =========================
+# 8. TOKENIZE DATASET
+# =========================
+tokenized_datasets = dataset.map(tokenize_function, batched=True)
+
+
+# =========================
+# 9. REMOVE UNUSED COLUMNS
+# =========================
+tokenized_datasets = tokenized_datasets.remove_columns(
+    ["id", "dialogue", "summary"]
+)
+
+tokenized_datasets.set_format("torch")
+
+
+# =========================
+# 10. DATA COLLATOR
+# =========================
+data_collator = DataCollatorForSeq2Seq(tokenizer, model=model)
+
+
+# =========================
+# 11. METRICS (ROUGE)
+# =========================
+rouge = evaluate.load("rouge")
+
+def compute_metrics(eval_pred):
+    preds, labels = eval_pred
+
+    decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
+
+    labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+    decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+
+    result = rouge.compute(
+        predictions=decoded_preds,
+        references=decoded_labels
+    )
+
+    return {k: round(v, 4) for k, v in result.items()}
+
+
+# =========================
+# 12. TRAINING ARGS
+# =========================
+training_args = TrainingArguments(
+    output_dir="./results",
+    learning_rate=3e-4,
+    per_device_train_batch_size=4,
+    per_device_eval_batch_size=2,
+    num_train_epochs=1,
+    weight_decay=0.01,
+    logging_steps=100,
+    save_strategy="no",
+    report_to="none"
+)
+
+
+# =========================
+# 13. TRAINER
+# =========================
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=tokenized_datasets["train"],
+    eval_dataset=tokenized_datasets["validation"],
+    data_collator=data_collator,
+    compute_metrics=compute_metrics
+)
+
+
+# =========================
+# 14. TRAIN MODEL
+# =========================
+trainer.train()
+
+
+# =========================
+# 15. PREDICT TEST SET
+# =========================
+preds = trainer.predict(tokenized_datasets["test"])
+
+decoded_preds = tokenizer.batch_decode(
+    np.argmax(preds.predictions, axis=-1),
+    skip_special_tokens=True
+)
+
+
+# =========================
+# 16. SUBMISSION FILE
+# =========================
+submission = pd.DataFrame({
+    "id": test_df["id"],
+    "summary": decoded_preds
+})
+
+submission.to_csv("submission.csv", index=False)
+
+print("✅ submission.csv created successfully")
