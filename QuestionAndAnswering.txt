@@ -1,0 +1,165 @@
+!pip install transformers datasets evaluate sentencepiece accelerate rouge-score
+
+import numpy as np
+import pandas as pd
+import torch
+from datasets import Dataset
+from transformers import (
+    AutoTokenizer,
+    AutoModelForSeq2SeqLM,
+    TrainingArguments,
+    Trainer
+)
+from rouge_score import rouge_scorer
+
+# Load data
+train_data = pd.read_csv(r"C:/Users/devra/AppData/Local/Temp/qa_train.csv")
+val_data = pd.read_csv(r"C:/Users/devra/AppData/Local/Temp/qa_validation.csv")
+test_data = pd.read_csv(r"C:/Users/devra/AppData/Local/Temp/qa_test_with_labels.csv")
+
+train_data.head()
+val_data.head()
+test_data.head()
+
+# Check missing values
+print(train_data.isnull().sum())
+print(val_data.isnull().sum())
+print(test_data.isnull().sum())
+
+# Drop missing values if any
+train_data.dropna(inplace=True)
+val_data.dropna(inplace=True)
+test_data.dropna(inplace=True)
+
+# Remove duplicates if any
+train_data.drop_duplicates(inplace=True)
+val_data.drop_duplicates(inplace=True)
+test_data.drop_duplicates(inplace=True)
+
+# Check shapes
+print(f"Train shape: {train_data.shape}")
+print(f"Validation shape: {val_data.shape}")
+print(f"Test shape: {test_data.shape}")
+
+# Convert pandas DataFrame to Hugging Face Dataset
+train_dataset = Dataset.from_pandas(train_data)
+val_dataset = Dataset.from_pandas(val_data)
+
+# Load model and tokenizer
+model_name = "t5-small"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+
+# Preprocessing function
+def preprocess(example):
+    inputs = ["answer the question: " + text for text in example["input"]]
+
+    model_inputs = tokenizer(
+        inputs,
+        max_length=128,
+        truncation=True,
+        padding="max_length"
+    )
+
+    labels = tokenizer(
+        example["response"],
+        max_length=128,
+        truncation=True,
+        padding="max_length"
+    )
+
+    model_inputs["labels"] = labels["input_ids"]
+    return model_inputs
+
+# Tokenize datasets
+train_dataset = train_dataset.map(preprocess, batched=True)
+val_dataset = val_dataset.map(preprocess, batched=True)
+
+# Training configuration
+training_args = TrainingArguments(
+    output_dir="./results",
+    learning_rate=2e-5,
+    per_device_train_batch_size=4,
+    per_device_eval_batch_size=4,
+    num_train_epochs=3,
+    weight_decay=0.01,
+    logging_steps=10,
+    save_total_limit=1,
+    report_to="none"
+)
+
+# Trainer
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=train_dataset,
+    eval_dataset=val_dataset
+)
+
+# Train model
+trainer.train()
+
+# Move model to device
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = model.to(device)
+
+# Function to generate answer
+def generate_answer(text):
+    input_text = "answer the question: " + text.strip()
+
+    inputs = tokenizer(
+        input_text,
+        return_tensors="pt",
+        max_length=128,
+        truncation=True
+    )
+    inputs = {key: value.to(device) for key, value in inputs.items()}
+
+    outputs = model.generate(
+        inputs["input_ids"],
+        max_length=128,
+        min_length=5,
+        num_beams=4,
+        early_stopping=True
+    )
+
+    return tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+# Evaluate on validation set using ROUGE
+scorer = rouge_scorer.RougeScorer(
+    ["rouge1", "rouge2", "rougeL"],
+    use_stemmer=True
+)
+
+scores = []
+for i, row in val_data.iterrows():
+    pred = generate_answer(row["input"])
+    print(i)
+
+    s = scorer.score(row["response"], pred)
+
+    score = (
+        0.4 * s["rouge1"].fmeasure +
+        0.3 * s["rouge2"].fmeasure +
+        0.3 * s["rougeL"].fmeasure
+    )
+
+    scores.append(score)
+
+print("Validation ROUGE Score:", np.mean(scores))
+
+# Generate predictions for test set
+test_predictions = []
+for i, question in enumerate(test_data["input"]):
+    print(i)
+    pred = generate_answer(question)
+    test_predictions.append(pred)
+
+# Save submission
+submission = pd.DataFrame({
+    "id": test_data["id"],
+    "predicted_response": test_predictions
+})
+
+submission.to_csv("submission.csv", index=False)
+print("submission.csv created successfully")

@@ -1,0 +1,180 @@
+!pip install transformers datasets pandas scikit-learn accelerate
+
+import pandas as pd
+import torch
+from datasets import Dataset, DatasetDict
+from transformers import (
+    AutoTokenizer,
+    AutoModelForSequenceClassification,
+    TrainingArguments,
+    Trainer
+)
+import numpy as np
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+
+train_df = pd.read_csv("/content/Train.csv")
+train_df.head()
+
+train_df.info()
+
+train_df.shape
+
+train_df.isnull()
+
+train_df.isnull().sum()
+
+train_df.duplicated()
+
+train_df.duplicated().sum()
+
+train_df.drop_duplicates()
+
+train_df.duplicated().sum()
+
+train_df.drop_duplicates(inplace=True)
+
+train_df.duplicated().sum()
+
+train_df.shape
+
+train_dataset = Dataset.from_pandas(train_df)
+train_dataset
+
+test_df = pd.read_csv("/content/Test.csv")
+test_df.head()
+
+test_df.shape
+
+test_df.isnull().sum()
+
+test_df.duplicated().sum()
+
+test_df.drop_duplicates(inplace=True)
+
+test_df.duplicated().sum()
+
+test_df.shape
+
+test_dataset = Dataset.from_pandas(test_df)
+test_dataset
+
+valid_df = pd.read_csv("/content/Valid.csv")
+valid_df.head()
+
+valid_df.shape
+
+valid_df.isnull().sum()
+
+valid_df.duplicated().sum()
+
+valid_df.drop_duplicates(inplace=True)
+
+valid_df.duplicated().sum()
+
+valid_df.shape
+
+valid_dataset = Dataset.from_pandas(valid_df)
+valid_dataset
+
+dataset = DatasetDict({
+    "train": train_dataset,
+    "validation": valid_dataset,
+    "test": test_dataset
+})
+dataset
+
+tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+
+def tokenize_function(example):
+    return tokenizer(
+        example["text"],
+        padding="max_length",
+        truncation=True,
+        max_length=128
+    )
+
+tokenized_datasets = dataset.map(tokenize_function, batched=True)
+tokenized_datasets
+
+tokenized_datasets = tokenized_datasets.remove_columns(["text"])
+tokenized_datasets
+
+tokenized_datasets = tokenized_datasets.rename_column("label", "labels")
+tokenized_datasets
+# Hugging Face models expect the target column to be named exactly "labels"
+
+# Converts data into PyTorch tensors
+tokenized_datasets.set_format("torch")
+tokenized_datasets
+
+# Load Pretrained BERT Model
+model = AutoModelForSequenceClassification.from_pretrained(
+    "bert-base-uncased",
+    num_labels=2
+)
+
+training_args = TrainingArguments(
+    output_dir="./results",
+    learning_rate=2e-5,
+    per_device_train_batch_size=8,
+    per_device_eval_batch_size=8,
+    num_train_epochs=2,
+    weight_decay=0.01,  # avoid overfitting
+    # evaluation_strategy="epoch",
+    save_strategy="no",
+    logging_dir="./logs",
+    logging_steps=200
+)
+
+def compute_metrics(pred):
+    logits, labels = pred
+    predictions = np.argmax(logits, axis=1)
+
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        labels, predictions, average='binary'
+    )
+    acc = accuracy_score(labels, predictions)
+
+    return {
+        "accuracy": acc,
+        "f1": f1,
+        "precision": precision,
+        "recall": recall
+    }
+
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=tokenized_datasets["train"],
+    eval_dataset=tokenized_datasets["validation"],
+    compute_metrics=compute_metrics
+)
+
+trainer.train()
+
+# Get predictions
+predictions = trainer.predict(tokenized_datasets["test"])
+predictions
+
+predictions.predictions.shape
+
+# Convert logits -> predicted class
+y_pred = np.argmax(predictions.predictions, axis=1)
+y_pred
+
+y_pred.shape
+
+# True labels
+y_true = test_df["label"]
+y_true
+
+from sklearn.metrics import f1_score
+
+f1_score(y_true, y_pred)
+
+# to create submission.csv
+submission = pd.DataFrame({
+    "id": test_df["id"],
+    "label": y_pred
+})
+submission.to_csv("submission.csv", index=False)

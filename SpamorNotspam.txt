@@ -1,0 +1,140 @@
+!pip install transformers datasets pandas scikit-learn accelerate
+
+import pandas as pd
+import numpy as np
+from datasets import Dataset, DatasetDict
+from transformers import (
+    AutoTokenizer,
+    AutoModelForSequenceClassification,
+    TrainingArguments,
+    Trainer
+)
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, f1_score
+
+# Load data
+train_df = pd.read_csv(r"C:/Users/devra/AppData/Local/Temp/train.csv")
+val_df = pd.read_csv(r"C:/Users/devra/AppData/Local/Temp/val.csv")
+test_df = pd.read_csv(r"C:/Users/devra/AppData/Local/Temp/test.csv")
+
+train_df.head()
+val_df.head()
+test_df.head()
+
+# Basic checks
+print(train_df.isnull().sum())
+print(val_df.isnull().sum())
+print(test_df.isnull().sum())
+
+# Remove missing values
+train_df.dropna(inplace=True)
+val_df.dropna(inplace=True)
+test_df.dropna(inplace=True)
+
+# Remove duplicates
+train_df.drop_duplicates(inplace=True)
+val_df.drop_duplicates(inplace=True)
+test_df.drop_duplicates(inplace=True)
+
+print("Train shape:", train_df.shape)
+print("Validation shape:", val_df.shape)
+print("Test shape:", test_df.shape)
+
+# Convert pandas DataFrames to Hugging Face Datasets
+train_dataset = Dataset.from_pandas(train_df)
+val_dataset = Dataset.from_pandas(val_df)
+test_dataset = Dataset.from_pandas(test_df)
+
+dataset = DatasetDict({
+    "train": train_dataset,
+    "validation": val_dataset,
+    "test": test_dataset
+})
+
+# Load tokenizer
+tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+
+# Tokenization
+def tokenize_function(example):
+    return tokenizer(
+        example["email"],
+        padding="max_length",
+        truncation=True,
+        max_length=128
+    )
+
+tokenized_datasets = dataset.map(tokenize_function, batched=True)
+
+# Keep only needed columns for training
+tokenized_datasets = tokenized_datasets.remove_columns(["email"])
+tokenized_datasets = tokenized_datasets.rename_column("label", "labels")
+tokenized_datasets.set_format("torch")
+
+# Load BERT model for binary classification
+model = AutoModelForSequenceClassification.from_pretrained(
+    "bert-base-uncased",
+    num_labels=2
+)
+
+# Metrics
+def compute_metrics(pred):
+    logits, labels = pred
+    predictions = np.argmax(logits, axis=1)
+
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        labels, predictions, average="binary"
+    )
+    acc = accuracy_score(labels, predictions)
+
+    return {
+        "accuracy": acc,
+        "f1": f1,
+        "precision": precision,
+        "recall": recall
+    }
+
+# Training config
+training_args = TrainingArguments(
+    output_dir="./results",
+    learning_rate=2e-5,
+    per_device_train_batch_size=8,
+    per_device_eval_batch_size=8,
+    num_train_epochs=2,
+    weight_decay=0.01,
+    logging_steps=100,
+    save_strategy="no",
+    report_to="none"
+)
+
+# Trainer
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=tokenized_datasets["train"],
+    eval_dataset=tokenized_datasets["validation"],
+    compute_metrics=compute_metrics
+)
+
+# Train
+trainer.train()
+
+# Predict on test set
+predictions = trainer.predict(tokenized_datasets["test"])
+
+# Convert logits to predicted class
+y_pred = np.argmax(predictions.predictions, axis=1)
+
+# True labels from test set
+y_true = test_df["label"]
+
+# Final test F1 score
+print("Test F1 Score:", f1_score(y_true, y_pred))
+print("Test Accuracy:", accuracy_score(y_true, y_pred))
+
+# Create submission file
+submission = pd.DataFrame({
+    "email": test_df["email"],
+    "predicted_label": y_pred
+})
+
+submission.to_csv("submission.csv", index=False)
+print("submission.csv created successfully")
